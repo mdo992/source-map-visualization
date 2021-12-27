@@ -1280,18 +1280,18 @@
           c.globalAlpha = 0.5;
           c.fillRect(caretX, caretY, 1, rowHeight);
           c.globalAlpha = 1;
-          status = `Line ${hover.row + 1}, Offset ${hover.index}`;
+          status = `Line ${hover.row + 1}, Offset ${hover.index + 1}`;
         }
 
         // Update the status bar
         if (hoveredMapping) {
           if (sourceIndex === null) {
-            status = `Line ${hoveredMapping.generatedLine + 1}, Offset ${hoveredMapping.generatedColumn}`;
+            status = `Line ${hoveredMapping.generatedLine + 1}, Offset ${hoveredMapping.generatedColumn + 1}`;
             if (hoveredMapping.originalName !== -1) {
               status += `, Name ${originalName(hoveredMapping.originalName)}`;
             }
           } else {
-            status = `Line ${hoveredMapping.originalLine + 1}, Offset ${hoveredMapping.originalColumn}`;
+            status = `Line ${hoveredMapping.originalLine + 1}, Offset ${hoveredMapping.originalColumn + 1}`;
             if (hoveredMapping.originalSource !== sourceIndex) {
               status += ` in ${otherSource(hoveredMapping.originalSource)}`;
             }
