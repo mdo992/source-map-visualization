@@ -505,6 +505,10 @@
       updateOriginalSource();
     }
 
+    copyButton.onclick = function() {
+        navigator.clipboard.writeText(sm.sources[fileList.selectedIndex].content);
+    }
+
     generatedTextArea = createTextArea({
       sourceIndex: null,
       text: code,

@@ -102,6 +102,11 @@ canvas {
   width: 80%;
 }
 
+#copyButtonParent {
+  max-width: 500px;
+  width: 80%;
+}
+
 select {
   width: 100%;
 }
