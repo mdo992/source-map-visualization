@@ -511,7 +511,11 @@
     fileList.selectedIndex = 0;
 
     copyButton.onclick = function() {
-        navigator.clipboard.writeText(sm.sources[fileList.selectedIndex].content);
+      navigator.clipboard.writeText(sm.sources[fileList.selectedIndex].content);
+    }
+
+    copyFileName.onclick = function() {
+      navigator.clipboard.writeText(sm.sources[fileList.selectedIndex].name);
     }
 
     generatedTextArea = createTextArea({

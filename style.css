@@ -103,6 +103,11 @@ canvas {
 }
 
 #copyButtonParent {
+  max-width: 85px;
+  width: 80%;
+}
+
+#copyFileNameParent {
   max-width: 500px;
   width: 80%;
 }
