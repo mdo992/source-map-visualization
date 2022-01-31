@@ -108,7 +108,12 @@ canvas {
 }
 
 #copyFileNameParent {
-  max-width: 500px;
+  max-width: 85px;
+  width: 80%;
+}
+
+#copyFileNamesParent {
+  max-width: 85px;
   width: 80%;
 }
 

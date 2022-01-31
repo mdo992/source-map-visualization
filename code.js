@@ -518,6 +518,16 @@
       navigator.clipboard.writeText(sm.sources[fileList.selectedIndex].name);
     }
 
+    copyFileNames.onclick = function() {
+      let list = '';
+      
+      for (sourceFile of sm.sources) {
+        list += '\n' + sourceFile.name
+      }
+
+      navigator.clipboard.writeText(list);
+    }
+
     generatedTextArea = createTextArea({
       sourceIndex: null,
       text: code,
