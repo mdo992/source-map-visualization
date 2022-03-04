@@ -54,6 +54,9 @@
   ////////////////////////////////////////////////////////////////////////////////
   // Loading
 
+  const utf8ToUTF16 = x => decodeURIComponent(escape(x));
+  const utf16ToUTF8 = x => unescape(encodeURIComponent(x));
+
   const promptText = document.getElementById('promptText');
   const errorText = document.getElementById('errorText');
   const toolbar = document.getElementById('toolbar');
@@ -74,49 +77,61 @@
     });
   }
 
-  function showLoadingError(text) {
+  function resetLoadingState() {
     promptText.style.display = 'block';
     toolbar.style.display = 'none';
     statusBar.style.display = 'none';
     canvas.style.display = 'none';
+  }
+
+  function showLoadingError(text) {
+    resetLoadingState();
     errorText.style.display = 'block';
     errorText.textContent = text;
+
+    // Push an empty hash since the state has been cleared
+    if (location.hash !== '') {
+      try {
+        history.pushState({}, '', location.pathname);
+      } catch (e) {
+      }
+    }
+  }
+
+  async function finishLoadingCodeWithEmbeddedSourceMap(code, file) {
+    // Check for both "//" and "/*" comments
+    let match = /\/(\/)[#@] *sourceMappingURL=([^\s]+)/.exec(code);
+    if (!match) match = /\/(\*)[#@] *sourceMappingURL=((?:[^\s*]|\*[^/])+)(?:[^*]|\*[^/])*\*\//.exec(code);
+
+    // Check for a non-empty data URL payload
+    if (match && match[2]) {
+      let map;
+      try {
+        // Use "new URL" to ensure that the URL has a protocol (e.g. "data:" or "https:")
+        map = await fetch(new URL(match[2])).then(r => r.text());
+      } catch (e) {
+        showLoadingError(`Failed to parse the URL in the "/${match[1]}# sourceMappingURL=" comment: ${e && e.message || e}`);
+        return;
+      }
+      finishLoading(code, map);
+    }
+
+    else if (file && isProbablySourceMap(file)) {
+      // Allow loading a source map without a generated file because why not
+      finishLoading('', code);
+    }
+
+    else {
+      const c = file && file.name.endsWith('ss') ? '*' : '/';
+      showLoadingError(`Failed to find an embedded "/${c}# sourceMappingURL=" comment in the ${file ? 'imported file' : 'pasted text'}.`);
+    }
   }
 
   async function startLoading(files) {
     if (files.length === 1) {
       const file0 = files[0];
       const code = await loadFile(file0);
-
-      // Check for both "//" and "/*" comments
-      let match = /\/\/#\s*sourceMappingURL=data:([^,]+),([^ ]+)/.exec(code);
-      if (!match) match = /\/\*#\s*sourceMappingURL=data:((?:[^,*]|\*[^/])+),((?:[^ *]|\*[^/])+)(?:[^*]|\*[^/])*\*\//.exec(code);
-
-      // Check for a non-empty data URL payload
-      if (match && match[2]) {
-        const parts = match[1].split(';');
-        const map = parts.indexOf('base64') >= 0 ? atob(match[2]) : decodeURIComponent(match[2]);
-        finishLoading(code, map);
-      }
-
-      else if (match = /\/([/*])#\s*sourceMappingURL=data:/.exec(code)) {
-        showLoadingError(`Could not find any base64 data in the embedded "/${match[1]}# sourceMappingURL=" comment.`);
-      }
-
-      else if (match = /\/([/*])#\s*sourceMappingURL=/.exec(code)) {
-        showLoadingError(`The embedded "/${match[1]}# sourceMappingURL=" comment does not contain an inline source map. ` +
-          `You must import both the JavaScript file and the source map file that goes with it.`);
-      }
-
-      else if (isProbablySourceMap(file0)) {
-        // Allow loading a source map without a generated file because why not
-        finishLoading('', code);
-      }
-
-      else {
-        const c = file0.name.endsWith('ss') ? '*' : '/';
-        showLoadingError(`Failed to find an embedded "/${c}# sourceMappingURL=" comment in the imported file.`);
-      }
+      finishLoadingCodeWithEmbeddedSourceMap(code, file0);
     }
 
     else if (files.length === 2) {
@@ -148,6 +163,12 @@
       showLoadingError(`Please import either 1 or 2 files.`);
     }
   }
+
+  document.body.addEventListener('paste', e => {
+    e.preventDefault();
+    const code = e.clipboardData.getData('text/plain');
+    finishLoadingCodeWithEmbeddedSourceMap(code, null);
+  });
 
   // Accelerate VLQ decoding with a lookup table
   const vlqTable = new Uint8Array(128);
@@ -465,6 +486,7 @@
     toolbar.style.display = 'flex';
     statusBar.style.display = 'flex';
     canvas.style.display = 'block';
+    updateHash(code, map);
     const sm = parseSourceMap(map);
 
     // Populate the file picker
@@ -476,7 +498,7 @@
     }
 
     // Update the original text area when the source changes
-    const otherSource = index => sm.sources[index].name;
+    const otherSource = index => index === -1 ? null : sm.sources[index].name;
     const originalName = index => sm.names[index];
     originalTextArea = null;
     if (sm.sources.length > 0) {
@@ -1307,7 +1329,7 @@
         }
 
         // Update the status bar
-        if (hoveredMapping) {
+        if (hoveredMapping && hoveredMapping.originalColumn !== -1) {
           if (sourceIndex === null) {
             status = `Line ${hoveredMapping.generatedLine + 1}, Offset ${hoveredMapping.generatedColumn + 1}`;
             if (hoveredMapping.originalName !== -1) {
@@ -1549,75 +1571,136 @@
     // Older browsers
     darkMedia.addListener(onDarkModeChange)
   }
+
+  ////////////////////////////////////////////////////////////////////////////////
+  // Shareable URLs
+
+  function loadFromHash() {
+    try {
+      // Reads a string in length-prefix form separated by a null character. This
+      // format is used because it's simple and also more compact than JSON.
+      const readBuffer = () => {
+        const zero = hash.indexOf('\0');
+        if (zero < 0) throw 'No null character';
+        const start = zero + 1;
+        const end = start + (0 | hash.slice(0, zero));
+        const buffer = hash.slice(start, end);
+        if (end > hash.length) throw 'Invalid length';
+        hash = hash.slice(end);
+        return buffer;
+      };
+
+      // Extract the length-prefixed data
+      let hash = atob(location.hash.slice(1));
+      const code = readBuffer();
+      const map = readBuffer();
+      if (hash !== '') throw 'Unexpected extra data';
+
+      finishLoading(utf8ToUTF16(code), utf8ToUTF16(map));
+    } catch (e) {
+      // Clear out an invalid hash and reset the UI
+      if (location.hash !== '') {
+        try {
+          history.replaceState({}, '', location.pathname);
+        } catch (e) {
+        }
+      }
+      resetLoadingState();
+    }
+  }
+
+  function updateHash(code, map) {
+    try {
+      const btoaLength = n => 4 * ((n + 2) / 3 | 0)
+      const kMaxURLDisplayChars = 32 * 1024; // Chrome limits URLs to 32kb in size
+      const url = new URL(location.href);
+      url.hash = '#'; // Clear the data in the hash but leave the hash prefix
+      const urlLength = url.href.length;
+
+      // Do a cheap check to see if the URL will be too long
+      let codeLength = `${code.length}\0`;
+      let mapLength = `${map.length}\0`;
+      let finalLength = urlLength + btoaLength(codeLength.length + code.length + mapLength.length + map.length)
+      if (finalLength >= kMaxURLDisplayChars) throw 'URL estimate too long';
+
+      // Do the expensive check to see if the URL will be too long
+      code = utf16ToUTF8(code);
+      map = utf16ToUTF8(map);
+      codeLength = `${code.length}\0`;
+      mapLength = `${map.length}\0`;
+      finalLength = urlLength + btoaLength(codeLength.length + code.length + mapLength.length + map.length)
+      if (finalLength >= kMaxURLDisplayChars) throw 'URL too long';
+
+      // Only pay the cost of building the string now that we know it'll work
+      const hash = '#' + btoa(`${codeLength}${code}${mapLength}${map}`);
+      if (location.hash !== hash) {
+        history.pushState({}, '', hash);
+      }
+    } catch (e) {
+      // Push an empty hash instead if it's too big for a URL
+      if (location.hash !== '') {
+        try {
+          history.pushState({}, '', location.pathname);
+        } catch (e) {
+        }
+      }
+    }
+  }
+
+  loadFromHash();
+  addEventListener('popstate', () => loadFromHash());
 })();
 
-const exampleJS = `// Generated by CoffeeScript 2.5.1
-(function() {
-  // Assignment:
-  var cubes, list, math, num, number, opposite, race, square;
+const exampleJS = `// index.tsx
+import { h as r, Fragment as s, render as c } from "preact";
 
-  number = 42;
-
-  opposite = true;
-
-  if (opposite) {
-    // Conditions:
-    number = -42;
+// counter.tsx
+import { h as t, Component as a } from "preact";
+import { useState as l } from "preact/hooks";
+var o = class extends a {
+  constructor(e) {
+    super(e);
+    this.state = { value: 0 };
+    this.increment = () => this.setState({ value: this.state.value + 1 });
+    this.decrement = () => this.setState({ value: this.state.value - 1 });
+    this.state.value = e.initialValue;
   }
-
-  // Functions:
-  square = function(x) {
-    return x * x;
-  };
-
-  // Arrays:
-  list = [1, 2, 3, 4, 5];
-
-  // Objects:
-  math = {
-    root: Math.sqrt,
-    square: square,
-    cube: function(x) {
-      return x * square(x);
-    }
-  };
-
-  // Splats:
-  race = function(winner, ...runners) {
-    return print(winner, runners);
-  };
-
-  if (typeof elvis !== \"undefined\" && elvis !== null) {
-    // Existence:
-    alert(\"I knew it!\");
+  render() {
+    return t("div", {
+      class: "counter"
+    }, t("h1", null, this.props.label), t("p", null, t("button", {
+      onClick: this.decrement
+    }, "-"), " ", this.state.value, " ", t("button", {
+      onClick: this.increment
+    }, "+")));
   }
+}, i = (n) => {
+  let [e, u] = l(n.initialValue);
+  return t("div", {
+    class: "counter"
+  }, t("h1", null, n.label), t("p", null, t("button", {
+    onClick: () => u(e - 1)
+  }, "-"), " ", e, " ", t("button", {
+    onClick: () => u(e + 1)
+  }, "+")));
+};
 
-  // Array comprehensions:
-  cubes = (function() {
-    var i, len, results;
-    results = [];
-    for (i = 0, len = list.length; i < len; i++) {
-      num = list[i];
-      results.push(math.cube(num));
-    }
-    return results;
-  })();
-
-}).call(this);
-
-//# sourceMappingURL=original.js.map
+// index.tsx
+c(r(s, null, r(o, {
+  label: "Counter 1",
+  initialValue: 100
+}), r(i, {
+  label: "Counter 2",
+  initialValue: 200
+})), document.getElementById("root"));
+//# sourceMappingURL=example.js.map
 `;
 
 const exampleMap = `{
   "version": 3,
-  "file": "original.js",
-  "sourceRoot": "",
-  "sources": [
-    "original.coffee"
-  ],
-  "names": [],
-  "mappings": ";AAAa;EAAA;AAAA,MAAA,KAAA,EAAA,IAAA,EAAA,IAAA,EAAA,GAAA,EAAA,MAAA,EAAA,QAAA,EAAA,IAAA,EAAA;;EACb,MAAA,GAAW;;EACX,QAAA,GAAW;;EAGX,IAAgB,QAAhB;;IAAA,MAAA,GAAS,CAAC,GAAV;GALa;;;EAQb,MAAA,GAAS,QAAA,CAAC,CAAD,CAAA;WAAO,CAAA,GAAI;EAAX,EARI;;;EAWb,IAAA,GAAO,CAAC,CAAD,EAAI,CAAJ,EAAO,CAAP,EAAU,CAAV,EAAa,CAAb,EAXM;;;EAcb,IAAA,GACE;IAAA,IAAA,EAAQ,IAAI,CAAC,IAAb;IACA,MAAA,EAAQ,MADR;IAEA,IAAA,EAAQ,QAAA,CAAC,CAAD,CAAA;aAAO,CAAA,GAAI,MAAA,CAAO,CAAP;IAAX;EAFR,EAfW;;;EAoBb,IAAA,GAAO,QAAA,CAAC,MAAD,EAAA,GAAS,OAAT,CAAA;WACL,KAAA,CAAM,MAAN,EAAc,OAAd;EADK;;EAIP,IAAsB,8CAAtB;;IAAA,KAAA,CAAM,YAAN,EAAA;GAxBa;;;EA2Bb,KAAA;;AAAS;IAAA,KAAA,sCAAA;;mBAAA,IAAI,CAAC,IAAL,CAAU,GAAV;IAAA,CAAA;;;AA3BI",
-  "sourcesContent": [
-    "# Assignment:\\nnumber   = 42\\nopposite = true\\n\\n# Conditions:\\nnumber = -42 if opposite\\n\\n# Functions:\\nsquare = (x) -> x * x\\n\\n# Arrays:\\nlist = [1, 2, 3, 4, 5]\\n\\n# Objects:\\nmath =\\n  root:   Math.sqrt\\n  square: square\\n  cube:   (x) -> x * square x\\n\\n# Splats:\\nrace = (winner, runners...) ->\\n  print winner, runners\\n\\n# Existence:\\nalert \\"I knew it!\\" if elvis?\\n\\n# Array comprehensions:\\ncubes = (math.cube num for num in list)\\n"
-  ]
-}`;
+  "sources": ["index.tsx", "counter.tsx"],
+  "sourcesContent": ["import { h, Fragment, render } from 'preact'\\nimport { CounterClass, CounterFunction } from './counter'\\n\\nrender(\\n  <>\\n    <CounterClass label=\\"Counter 1\\" initialValue={100} />\\n    <CounterFunction label=\\"Counter 2\\" initialValue={200} />\\n  </>,\\n  document.getElementById('root')!,\\n)\\n", "import { h, Component } from 'preact'\\nimport { useState } from 'preact/hooks'\\n\\ninterface CounterProps {\\n  label: string\\n  initialValue: number\\n}\\n\\ninterface CounterState {\\n  value: number\\n}\\n\\nexport class CounterClass extends Component<CounterProps, CounterState> {\\n  state: CounterState = { value: 0 }\\n\\n  constructor(props: CounterProps) {\\n    super(props)\\n    this.state.value = props.initialValue\\n  }\\n\\n  increment = () => this.setState({ value: this.state.value + 1 })\\n  decrement = () => this.setState({ value: this.state.value - 1 })\\n\\n  render() {\\n    return <div class=\\"counter\\">\\n      <h1>{this.props.label}</h1>\\n      <p>\\n        <button onClick={this.decrement}>-</button>\\n        {' '}\\n        {this.state.value}\\n        {' '}\\n        <button onClick={this.increment}>+</button>\\n      </p>\\n    </div>\\n  }\\n}\\n\\nexport let CounterFunction = (props: CounterProps) => {\\n  let [value, setValue] = useState(props.initialValue)\\n  return <div class=\\"counter\\">\\n    <h1>{props.label}</h1>\\n    <p>\\n      <button onClick={() => setValue(value - 1)}>-</button>\\n      {' '}\\n      {value}\\n      {' '}\\n      <button onClick={() => setValue(value + 1)}>+</button>\\n    </p>\\n  </div>\\n}\\n"],
+  "mappings": ";AAAA;;;ACAA;AACA;AAWO,sBAA2B,EAAsC;AAAA,EAGtE,YAAY,GAAqB;AAC/B,UAAM;AAHR,iBAAsB,EAAE,OAAO;AAO/B,qBAAY,MAAM,KAAK,SAAS,EAAE,OAAO,KAAK,MAAM,QAAQ;AAC5D,qBAAY,MAAM,KAAK,SAAS,EAAE,OAAO,KAAK,MAAM,QAAQ;AAJ1D,SAAK,MAAM,QAAQ,EAAM;AAAA;AAAA,EAM3B,SAAS;AACP,WAAO,EAAC,OAAD;AAAA,MAAK,OAAM;AAAA,OAChB,EAAC,MAAD,MAAK,KAAK,MAAM,QAChB,EAAC,KAAD,MACE,EAAC,UAAD;AAAA,MAAQ,SAAS,KAAK;AAAA,OAAW,MAChC,KACA,KAAK,MAAM,OACX,KACD,EAAC,UAAD;AAAA,MAAQ,SAAS,KAAK;AAAA,OAAW;AAAA;AAAA,GAM9B,IAAkB,CAAC,MAAwB;AACpD,MAAI,CAAC,GAAO,KAAY,EAAS,EAAM;AACvC,SAAO,EAAC,OAAD;AAAA,IAAK,OAAM;AAAA,KAChB,EAAC,MAAD,MAAK,EAAM,QACX,EAAC,KAAD,MACE,EAAC,UAAD;AAAA,IAAQ,SAAS,MAAM,EAAS,IAAQ;AAAA,KAAI,MAC3C,KACA,GACA,KACD,EAAC,UAAD;AAAA,IAAQ,SAAS,MAAM,EAAS,IAAQ;AAAA,KAAI;AAAA;;;AD3ClD,EACE,WACE,EAAC,GAAD;AAAA,EAAc,OAAM;AAAA,EAAY,cAAc;AAAA,IAC9C,EAAC,GAAD;AAAA,EAAiB,OAAM;AAAA,EAAY,cAAc;AAAA,KAEnD,SAAS,eAAe;",
+  "names": []
+}
+`;
