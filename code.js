@@ -176,7 +176,7 @@
   for (let i = 0; i < vlqTable.length; i++) vlqTable[i] = 0xFF;
   for (let i = 0; i < vlqChars.length; i++) vlqTable[vlqChars.charCodeAt(i)] = i;
 
-  function decodeMappings(mappings, sourcesCount) {
+  function decodeMappings(mappings, sourcesCount, namesCount) {
     const n = mappings.length;
     let data = new Int32Array(1024);
     let dataLength = 0;
@@ -203,11 +203,11 @@
       // Scan over the input
       while (true) {
         // Read a byte
-        if (i >= mappings.length) decodeError('Expected extra data');
+        if (i >= mappings.length) decodeError('Unexpected early end of mapping data');
         const c = mappings.charCodeAt(i);
-        if ((c & 0x7F) !== c) decodeError('Invalid character');
+        if ((c & 0x7F) !== c) decodeError(`Invalid mapping character: ${JSON.stringify(String.fromCharCode(c))}`);
         const index = vlqTable[c & 0x7F];
-        if (index === 0xFF) decodeError('Invalid character');
+        if (index === 0xFF) decodeError(`Invalid mapping character: ${JSON.stringify(String.fromCharCode(c))}`);
         i++;
 
         // Decode the byte
@@ -273,7 +273,7 @@
       const generatedColumnDelta = decodeVLQ();
       if (generatedColumnDelta < 0) needToSortGeneratedColumns = true;
       generatedColumn += generatedColumnDelta;
-      if (generatedColumn < 0) decodeError('Invalid generated column');
+      if (generatedColumn < 0) decodeError(`Invalid generated column: ${generatedColumn}`);
 
       // It's valid for a mapping to have 1, 4, or 5 variable-length fields
       let isOriginalSourceMissing = true;
@@ -288,17 +288,17 @@
           // Read the original source
           const originalSourceDelta = decodeVLQ();
           originalSource += originalSourceDelta;
-          if (originalSource < 0 || originalSource >= sourcesCount) decodeError('Invalid original source');
+          if (originalSource < 0 || originalSource >= sourcesCount) decodeError(`Original source index ${originalSource} is invalid (there are ${sourcesCount} sources)`);
 
           // Read the original line
           const originalLineDelta = decodeVLQ();
           originalLine += originalLineDelta;
-          if (originalLine < 0) decodeError('Invalid original line');
+          if (originalLine < 0) decodeError(`Invalid original line: ${originalLine}`);
 
           // Read the original column
           const originalColumnDelta = decodeVLQ();
           originalColumn += originalColumnDelta;
-          if (originalColumn < 0) decodeError('Invalid original column');
+          if (originalColumn < 0) decodeError(`Invalid original column: ${originalColumn}`);
 
           // Check for the optional name index
           if (i < n) {
@@ -311,7 +311,7 @@
               // Read the optional name index
               const originalNameDelta = decodeVLQ();
               originalName += originalNameDelta;
-              if (originalName < 0) decodeError('Invalid original name');
+              if (originalName < 0 || originalName >= namesCount) decodeError(`Original name index ${originalName} is invalid (there are ${namesCount} names)`);
 
               // Handle the next character
               if (i < n) {
@@ -319,7 +319,7 @@
                 if (c === 44 /* , */) {
                   i++;
                 } else if (c !== 59 /* ; */) {
-                  decodeError('Invalid character after mapping');
+                  decodeError(`Invalid character after mapping: ${JSON.stringify(String.fromCharCode(c))}`);
                 }
               }
             }
@@ -472,7 +472,7 @@
       };
     }
 
-    const data = decodeMappings(mappings, sources.length);
+    const data = decodeMappings(mappings, sources.length, names.length);
     generateInverseMappings(sources, data);
     return { sources, names, data };
   }
@@ -1172,6 +1172,7 @@
         const badMappingBatches = [];
         const whitespaceBatch = [];
         const textBatch = [];
+        let hoveredName = null;
         for (let i = 0; i < originalLineColors.length; i++) {
           mappingBatches.push([]);
           badMappingBatches.push([]);
@@ -1222,6 +1223,9 @@
             // Get the bounds of this mapping, which may be empty if it's ignored
             const range = rangeOfMapping(map);
             if (range === null) continue;
+            const { startColumn, endColumn } = range;
+            const color = mappings[map + 3] % originalLineColors.length;
+            const [x1, y1, x2, y2] = boxForRange(x, y, row, columnWidth, range);
 
             // Check if this mapping is hovered
             let isHovered = false;
@@ -1244,12 +1248,16 @@
                 // mapping instead of showing everything that matches the target
                 // so hovering isn't confusing.
                 : isGenerated ? matchesGenerated : matchesOriginal);
+              if (isGenerated && matchesGenerated && hoveredMapping.originalName !== -1) {
+                hoveredName = {
+                  text: originalName(hoveredMapping.originalName),
+                  x: Math.round(x - scrollX + margin + textPaddingX + range.startColumn * columnWidth - 2),
+                  y: Math.round(y + textPaddingY - scrollY + (row + 1.2) * rowHeight),
+                };
+              }
             }
 
             // Add a rectangle to that color's batch
-            const { startColumn, endColumn } = range;
-            const color = mappings[map + 3] % originalLineColors.length;
-            const [x1, y1, x2, y2] = boxForRange(x, y, row, columnWidth, range);
             if (isHovered) {
               hoverBoxes.push({ color, rect: [x1 - 2, y1 - 2, x2 - x1 + 4, y2 - y1 + 4] });
             } else if (row >= lines.length || startColumn > endOfLineColumn) {
@@ -1332,9 +1340,6 @@
         if (hoveredMapping && hoveredMapping.originalColumn !== -1) {
           if (sourceIndex === null) {
             status = `Line ${hoveredMapping.generatedLine + 1}, Offset ${hoveredMapping.generatedColumn + 1}`;
-            if (hoveredMapping.originalName !== -1) {
-              status += `, Name ${originalName(hoveredMapping.originalName)}`;
-            }
           } else {
             status = `Line ${hoveredMapping.originalLine + 1}, Offset ${hoveredMapping.originalColumn + 1}`;
             if (hoveredMapping.originalSource !== sourceIndex) {
@@ -1358,6 +1363,28 @@
           for (let j = 0; j < textBatch.length; j += 3) {
             c.fillText(textBatch[j], textBatch[j + 1], textBatch[j + 2]);
           }
+        }
+
+        // Draw the original name tooltip
+        if (hoveredName) {
+          const { text, x, y } = hoveredName;
+          const w = 2 * textPaddingX + c.measureText(text).width;
+          const h = rowHeight;
+          const r = 4;
+          c.beginPath();
+          c.arc(x + r, y + r, r, - Math.PI, -Math.PI / 2, false);
+          c.arc(x + w - r, y + r, r, -Math.PI / 2, 0, false);
+          c.arc(x + w - r, y + h - r, r, 0, Math.PI / 2, false);
+          c.arc(x + r, y + h - r, r, Math.PI / 2, Math.PI, false);
+          c.save();
+          c.shadowColor = 'rgba(0, 0, 0, 0.5)';
+          c.shadowOffsetY = 3;
+          c.shadowBlur = 10;
+          c.fillStyle = textColor;
+          c.fill();
+          c.restore();
+          c.fillStyle = backgroundColor;
+          c.fillText(text, x + textPaddingX, y + 0.7 * rowHeight);
         }
 
         // Draw the margin shadow
@@ -1652,55 +1679,57 @@
 })();
 
 const exampleJS = `// index.tsx
-import { h as r, Fragment as s, render as c } from "preact";
+import { h as u, Fragment as l, render as c } from "preact";
 
 // counter.tsx
-import { h as t, Component as a } from "preact";
-import { useState as l } from "preact/hooks";
-var o = class extends a {
+import { h as t, Component as i } from "preact";
+import { useState as a } from "preact/hooks";
+var n = class extends i {
   constructor(e) {
     super(e);
-    this.state = { value: 0 };
-    this.increment = () => this.setState({ value: this.state.value + 1 });
-    this.decrement = () => this.setState({ value: this.state.value - 1 });
-    this.state.value = e.initialValue;
+    this.n = () => this.setState({ t: this.state.t + 1 });
+    this.r = () => this.setState({ t: this.state.t - 1 });
+    this.state.t = e.e;
   }
   render() {
     return t("div", {
       class: "counter"
     }, t("h1", null, this.props.label), t("p", null, t("button", {
-      onClick: this.decrement
-    }, "-"), " ", this.state.value, " ", t("button", {
-      onClick: this.increment
+      onClick: this.r
+    }, "-"), " ", this.state.t, " ", t("button", {
+      onClick: this.n
     }, "+")));
   }
-}, i = (n) => {
-  let [e, u] = l(n.initialValue);
+}, s = (r) => {
+  let [o, e] = a(r.e);
   return t("div", {
     class: "counter"
-  }, t("h1", null, n.label), t("p", null, t("button", {
-    onClick: () => u(e - 1)
-  }, "-"), " ", e, " ", t("button", {
-    onClick: () => u(e + 1)
+  }, t("h1", null, r.o), t("p", null, t("button", {
+    onClick: () => e(o - 1)
+  }, "-"), " ", o, " ", t("button", {
+    onClick: () => e(o + 1)
   }, "+")));
 };
 
 // index.tsx
-c(r(s, null, r(o, {
-  label: "Counter 1",
-  initialValue: 100
-}), r(i, {
-  label: "Counter 2",
-  initialValue: 200
-})), document.getElementById("root"));
+c(
+  u(l, null, u(n, {
+    o: "Counter 1",
+    e: 100
+  }), u(s, {
+    o: "Counter 2",
+    e: 200
+  })),
+  document.getElementById("root")
+);
 //# sourceMappingURL=example.js.map
 `;
 
 const exampleMap = `{
   "version": 3,
   "sources": ["index.tsx", "counter.tsx"],
-  "sourcesContent": ["import { h, Fragment, render } from 'preact'\\nimport { CounterClass, CounterFunction } from './counter'\\n\\nrender(\\n  <>\\n    <CounterClass label=\\"Counter 1\\" initialValue={100} />\\n    <CounterFunction label=\\"Counter 2\\" initialValue={200} />\\n  </>,\\n  document.getElementById('root')!,\\n)\\n", "import { h, Component } from 'preact'\\nimport { useState } from 'preact/hooks'\\n\\ninterface CounterProps {\\n  label: string\\n  initialValue: number\\n}\\n\\ninterface CounterState {\\n  value: number\\n}\\n\\nexport class CounterClass extends Component<CounterProps, CounterState> {\\n  state: CounterState = { value: 0 }\\n\\n  constructor(props: CounterProps) {\\n    super(props)\\n    this.state.value = props.initialValue\\n  }\\n\\n  increment = () => this.setState({ value: this.state.value + 1 })\\n  decrement = () => this.setState({ value: this.state.value - 1 })\\n\\n  render() {\\n    return <div class=\\"counter\\">\\n      <h1>{this.props.label}</h1>\\n      <p>\\n        <button onClick={this.decrement}>-</button>\\n        {' '}\\n        {this.state.value}\\n        {' '}\\n        <button onClick={this.increment}>+</button>\\n      </p>\\n    </div>\\n  }\\n}\\n\\nexport let CounterFunction = (props: CounterProps) => {\\n  let [value, setValue] = useState(props.initialValue)\\n  return <div class=\\"counter\\">\\n    <h1>{props.label}</h1>\\n    <p>\\n      <button onClick={() => setValue(value - 1)}>-</button>\\n      {' '}\\n      {value}\\n      {' '}\\n      <button onClick={() => setValue(value + 1)}>+</button>\\n    </p>\\n  </div>\\n}\\n"],
-  "mappings": ";AAAA;;;ACAA;AACA;AAWO,sBAA2B,EAAsC;AAAA,EAGtE,YAAY,GAAqB;AAC/B,UAAM;AAHR,iBAAsB,EAAE,OAAO;AAO/B,qBAAY,MAAM,KAAK,SAAS,EAAE,OAAO,KAAK,MAAM,QAAQ;AAC5D,qBAAY,MAAM,KAAK,SAAS,EAAE,OAAO,KAAK,MAAM,QAAQ;AAJ1D,SAAK,MAAM,QAAQ,EAAM;AAAA;AAAA,EAM3B,SAAS;AACP,WAAO,EAAC,OAAD;AAAA,MAAK,OAAM;AAAA,OAChB,EAAC,MAAD,MAAK,KAAK,MAAM,QAChB,EAAC,KAAD,MACE,EAAC,UAAD;AAAA,MAAQ,SAAS,KAAK;AAAA,OAAW,MAChC,KACA,KAAK,MAAM,OACX,KACD,EAAC,UAAD;AAAA,MAAQ,SAAS,KAAK;AAAA,OAAW;AAAA;AAAA,GAM9B,IAAkB,CAAC,MAAwB;AACpD,MAAI,CAAC,GAAO,KAAY,EAAS,EAAM;AACvC,SAAO,EAAC,OAAD;AAAA,IAAK,OAAM;AAAA,KAChB,EAAC,MAAD,MAAK,EAAM,QACX,EAAC,KAAD,MACE,EAAC,UAAD;AAAA,IAAQ,SAAS,MAAM,EAAS,IAAQ;AAAA,KAAI,MAC3C,KACA,GACA,KACD,EAAC,UAAD;AAAA,IAAQ,SAAS,MAAM,EAAS,IAAQ;AAAA,KAAI;AAAA;;;AD3ClD,EACE,WACE,EAAC,GAAD;AAAA,EAAc,OAAM;AAAA,EAAY,cAAc;AAAA,IAC9C,EAAC,GAAD;AAAA,EAAiB,OAAM;AAAA,EAAY,cAAc;AAAA,KAEnD,SAAS,eAAe;",
-  "names": []
+  "sourcesContent": ["import { h, Fragment, render } from 'preact'\\nimport { CounterClass, CounterFunction } from './counter'\\n\\nrender(\\n  <>\\n    <CounterClass label_=\\"Counter 1\\" initialValue_={100} />\\n    <CounterFunction label_=\\"Counter 2\\" initialValue_={200} />\\n  </>,\\n  document.getElementById('root')!,\\n)\\n", "import { h, Component } from 'preact'\\nimport { useState } from 'preact/hooks'\\n\\ninterface CounterProps {\\n  label_: string\\n  initialValue_: number\\n}\\n\\ninterface CounterState {\\n  value_: number\\n}\\n\\nexport class CounterClass extends Component<CounterProps, CounterState> {\\n  state: CounterState\\n\\n  constructor(props: CounterProps) {\\n    super(props)\\n    this.state.value_ = props.initialValue_\\n  }\\n\\n  increment_ = () => this.setState({ value_: this.state.value_ + 1 })\\n  decrement_ = () => this.setState({ value_: this.state.value_ - 1 })\\n\\n  render() {\\n    return <div class=\\"counter\\">\\n      <h1>{this.props.label}</h1>\\n      <p>\\n        <button onClick={this.decrement_}>-</button>\\n        {' '}\\n        {this.state.value_}\\n        {' '}\\n        <button onClick={this.increment_}>+</button>\\n      </p>\\n    </div>\\n  }\\n}\\n\\nexport let CounterFunction = (props: CounterProps) => {\\n  let [value, setValue] = useState(props.initialValue_)\\n  return <div class=\\"counter\\">\\n    <h1>{props.label_}</h1>\\n    <p>\\n      <button onClick={() => setValue(value - 1)}>-</button>\\n      {' '}\\n      {value}\\n      {' '}\\n      <button onClick={() => setValue(value + 1)}>+</button>\\n    </p>\\n  </div>\\n}\\n"],
+  "mappings": ";AAAA,SAAS,KAAAA,GAAG,YAAAC,GAAU,UAAAC,SAAc;;;ACApC,SAAS,KAAAC,GAAG,aAAAC,SAAiB;AAC7B,SAAS,YAAAC,SAAgB;AAWlB,IAAMC,IAAN,cAA2BF,EAAsC;AAAA,EAGtE,YAAYG,GAAqB;AAC/B,UAAMA,CAAK;AAIb,SAAAC,IAAa,MAAM,KAAK,SAAS,EAAEC,GAAQ,KAAK,MAAMA,IAAS,EAAE,CAAC;AAClE,SAAAC,IAAa,MAAM,KAAK,SAAS,EAAED,GAAQ,KAAK,MAAMA,IAAS,EAAE,CAAC;AAJhE,SAAK,MAAMA,IAASF,EAAMI;AAAA,EAC5B;AAAA,EAKA,SAAS;AACP,WAAOR,EAAC;AAAA,MAAI,OAAM;AAAA,OAChBA,EAAC,YAAI,KAAK,MAAM,KAAM,GACtBA,EAAC,WACCA,EAAC;AAAA,MAAO,SAAS,KAAKO;AAAA,OAAY,GAAC,GAClC,KACA,KAAK,MAAMD,GACX,KACDN,EAAC;AAAA,MAAO,SAAS,KAAKK;AAAA,OAAY,GAAC,CACrC,CACF;AAAA,EACF;AACF,GAEWI,IAAkB,CAACL,MAAwB;AACpD,MAAI,CAACM,GAAOC,CAAQ,IAAIT,EAASE,EAAMI,CAAa;AACpD,SAAOR,EAAC;AAAA,IAAI,OAAM;AAAA,KAChBA,EAAC,YAAII,EAAMQ,CAAO,GAClBZ,EAAC,WACCA,EAAC;AAAA,IAAO,SAAS,MAAMW,EAASD,IAAQ,CAAC;AAAA,KAAG,GAAC,GAC5C,KACAA,GACA,KACDV,EAAC;AAAA,IAAO,SAAS,MAAMW,EAASD,IAAQ,CAAC;AAAA,KAAG,GAAC,CAC/C,CACF;AACF;;;AD9CAG;AAAA,EACEC,EAAAC,GAAA,MACED,EAACE,GAAA;AAAA,IAAaC,GAAO;AAAA,IAAYC,GAAe;AAAA,GAAK,GACrDJ,EAACK,GAAA;AAAA,IAAgBF,GAAO;AAAA,IAAYC,GAAe;AAAA,GAAK,CAC1D;AAAA,EACA,SAAS,eAAe,MAAM;AAChC;",
+  "names": ["h", "Fragment", "render", "h", "Component", "useState", "CounterClass", "props", "increment_", "value_", "decrement_", "initialValue_", "CounterFunction", "value", "setValue", "label_", "render", "h", "Fragment", "CounterClass", "label_", "initialValue_", "CounterFunction"]
 }
 `;
